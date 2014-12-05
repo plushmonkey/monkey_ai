@@ -23,6 +23,7 @@ local Iprng *prng;
 local Inet *net;
 
 #define MODULE_NAME "monkey_ai"
+#define UPDATE_FREQUENCY 25
 
 local const char *ShipNames[] = { "Warbird", "Javelin", "Spider", "Leviathan",
                                   "Terrier", "Weasel", "Lancaster", "Shark" };
@@ -406,8 +407,8 @@ local void CheckWeaponHit(AIPlayer *aip) {
         double wx = weapon->x;
         double wy = weapon->y;
 
-        double x = aip->x + ((aip->xspeed / 10) * 25.0 / 100.0);
-        double y = aip->y + ((aip->yspeed / 10) * 25.0 / 100.0);
+        double x = aip->x + ((aip->xspeed / 10) * UPDATE_FREQUENCY / 100.0);
+        double y = aip->y + ((aip->yspeed / 10) * UPDATE_FREQUENCY / 100.0);
 
         double dx = wx - x;
         double dy = wy - y;
@@ -588,7 +589,7 @@ int UpdateRepel(EnemyWeapon *weapon, int dt) {
     int ticks = current_ticks();
     
     pthread_mutex_lock(&ad->mutex);
-    if (ticks - weapon->created >= 25 + ad->config.repel_time) {
+    if (ticks - weapon->created >= UPDATE_FREQUENCY + ad->config.repel_time) {
         pthread_mutex_unlock(&ad->mutex);
         return 1;   // It will be marked as destroyed in the calling function
     }
@@ -613,7 +614,8 @@ int UpdateRepel(EnemyWeapon *weapon, int dt) {
     
     EnemyWeapon *w;
     FOR_EACH(&ad->weapons, w, link) {
-        if (weapon->shooter->p_freq == weapon->shooter->p_freq) continue;
+        if (w->shooter->p_freq == weapon->shooter->p_freq) continue;
+        if (w->type == W_REPEL) continue;
         
         int dx = w->x - weapon->x;
         int dy = w->y - weapon->y;
@@ -1189,7 +1191,7 @@ EXPORT int MM_ai(int action, Imodman *mm_, Arena* arena) {
             LLInit(&ad->weapons);
             LLInit(&ad->weapons_destroy);
             
-            ml->SetTimer(UpdateTimer, 25, 25, arena, NULL);
+            ml->SetTimer(UpdateTimer, UPDATE_FREQUENCY, UPDATE_FREQUENCY, arena, NULL);
 
             cmd->AddCommand("createai", Ccreateai, arena, help_createai);
             cmd->AddCommand("removeai", Cremoveai, arena, help_removeai);
