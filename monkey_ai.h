@@ -10,6 +10,7 @@ typedef int (*WeaponUpdate)(struct EnemyWeapon *, int);
 typedef struct {
     /** The name of this ai player. */
     char name[24];
+    
     /** The current ship of this ai player. */
     byte ship;
 

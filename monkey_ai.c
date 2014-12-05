@@ -95,6 +95,9 @@ typedef struct {
     /** Blast radius in pixels for an L1 bomb. L2 doubles, L3 tripesl. */
     int bomb_explode_pixels;
     
+    /** How long in ticks after the prox sensor is triggered before bomb explodes */
+    int bomb_explode_delay;
+    
     /** Radius of prox trigger in tiles. */
     int proximity_distance;
     
@@ -149,6 +152,7 @@ local int adkey;
 local void ReadConfig(Arena* arena);
 local void DestroyAIPlayer(LinkedList *players, AIPlayer *aip);
 local void GetSpawnPoint(Arena *arena, int freq, int *spawnx, int *spawny);
+int InSafe(Arena *arena, int x, int y);
 
 /************************/
 
@@ -172,7 +176,7 @@ local AIPlayer *CreateAI(Arena *arena, const char *name, int freq, int ship) {
     if (*name) 
         strncpy(aip->name, name, 24);
     else 
-        strncpy(aip->name, "ai", 24);
+        strncpy(aip->name, "*ai*", 24);
     
     int x, y;
     GetSpawnPoint(arena, freq, &x, &y);
@@ -321,6 +325,7 @@ local Player *GetTargetPlayer(AIPlayer *aip) {
     FOR_EACH_PLAYER_IN_ARENA(player, arena) {
         if (!IS_HUMAN(player)) continue;
         if (player->p_freq == aip->freq) continue;
+        if (player->flags.is_dead || InSafe(arena, player->position.x / 16, player->position.y / 16)) continue;
         
         if (player->p_ship != SHIP_SPEC) {
             int dx = player->position.x - aip->x;
@@ -353,6 +358,7 @@ local void DoSplashDamage(Arena *arena, EnemyWeapon *weapon, AIPlayer *aip) {
     
     FOR_EACH(&ad->players, p, link) {
         if (p == aip) continue;
+        if (InSafe(arena, p->x / 16, p->y / 16)) continue;
         
         int dx = p->x - weapon->x;
         int dy = p->y - weapon->y;
@@ -378,24 +384,18 @@ local void CheckWeaponHit(AIPlayer *aip) {
 
     pthread_mutex_lock(&ad->mutex);
     
+    // Used for bomb calculations
+    double ed = ad->config.bomb_explode_delay;
+    double nx = aip->x + ((aip->xspeed / 10) * (ed / 100.0));
+    double ny = aip->y + ((aip->yspeed / 10) * (ed / 100.0));
+    
     FOR_EACH(&ad->weapons, weapon, link) {
         if (weapon->active == 0 || weapon->destroy == 1) continue;
         if (weapon->shooter->p_freq == aip->freq) continue;
+        if (weapon->shooter == aip->player) continue;
         if (weapon->type == W_REPEL) continue;
         
-        // check if hit
         int ship_radius = ad->config.radius[aip->ship];
-        double wx = weapon->x;
-        double wy = weapon->y;
-
-        double x = aip->x;
-        double y = aip->y;
-
-        double dx = wx - x;
-        double dy = wy - y;
-
-        double dist = sqrt(dx * dx + dy * dy);
-
         int hit_dist = ship_radius * 2;
         
         if (weapon->type == W_PROXBOMB) {
@@ -403,11 +403,31 @@ local void CheckWeaponHit(AIPlayer *aip) {
             hit_dist = ship_radius + prox_dist * 16;
         }
         
+        double wx = weapon->x;
+        double wy = weapon->y;
+
+        double x = aip->x + ((aip->xspeed / 10) * 25.0 / 100.0);
+        double y = aip->y + ((aip->yspeed / 10) * 25.0 / 100.0);
+
+        double dx = wx - x;
+        double dy = wy - y;
+
+        double dist = sqrt(dx * dx + dy * dy);
+        
         if (dist <= hit_dist) {
             int damage = weapon->max_damage;
             
             if (weapon->type == W_BOMB || weapon->type == W_PROXBOMB) {
-                damage = fmin(1.0, ((hit_dist - dist) / hit_dist + 0.3)) * damage;
+                // Move weapon position and player position by the bomb explode delay then calculate damage.
+                double nwx = weapon->x + cos(weapon->rotation) * (ed / 100.0) + ((weapon->xspeed / 10) * (ed / 100.0));
+                double nwy = weapon->y - sin(weapon->rotation) * (ed / 100.0) - ((weapon->yspeed / 10) * (ed / 100.0));;
+                double ndx = nwx - nx;
+                double ndy = nwy - ny;
+                double ndist = sqrt(ndx * ndx + ndy * ndy);
+                
+                if (ndist > dist) ndist = dist;
+                // This is mostly just random bomb damage atm. Do at least 30% bomb damage
+                damage = fmax(0.3, fmin(1.0, ((hit_dist - ndist) / hit_dist) + (prng->Number(0, 10) / 10.0))) * damage;
                 DoSplashDamage(aip->player->arena, weapon, aip);
             }
             
@@ -687,10 +707,11 @@ local void DoTick(Arena *arena) {
             double yinc = (aip->yspeed / 10) * (1.0 / 100.0);
             
             if (IsSolid(arena, (aip->x + xinc) / 16, (aip->y + yinc) / 16)) {
-                aip->xspeed *= -1;
-                aip->yspeed *= -1;
-                xinc = -xinc;
-                yinc = -yinc;
+                // todo: better physics. This just flips the xspeed and yspeed bouncing them straight backwards.
+                aip->xspeed *= -0.7;
+                aip->yspeed *= -0.7;
+                xinc = (aip->xspeed / 10) * (1.0 / 100.0);
+                yinc = (aip->yspeed / 10) * (1.0 / 100.0);
             }
 
             // Increase bot's actual position
@@ -736,7 +757,9 @@ local int UpdateTimer(void *param) {
     
     ppk.type = C2S_POSITION;
     ppk.rotation = 0;
-    ppk.weapon.type = W_NULL;
+    ppk.weapon.type = W_BOUNCEBULLET;
+    ppk.weapon.level = 1;
+    ppk.weapon.alternate = 0;
     ppk.x = 512 * 16;
     ppk.y = 512 * 16;
     ppk.time = current_ticks();
@@ -782,6 +805,9 @@ local int UpdateTimer(void *param) {
         ppk.energy = aip->energy;
         ppk.xspeed = aip->xspeed;
         ppk.yspeed = aip->yspeed;
+        
+        if (!aip->target || InSafe(arena, ppk.x / 16, ppk.y / 16))
+            ppk.weapon.type = W_NULL;
 
         game->FakePosition(aip->player, &ppk, sizeof(ppk));
     }
@@ -863,8 +889,7 @@ local void OnPPK(Player *p, const struct C2SPosition *pos) {
     
     int radius = ad->config.radius[p->p_ship];
     
-    weapon->x = pos->x + radius * cos(weapon->rotation);
-    weapon->y = pos->y - radius * sin(weapon->rotation);
+    
     weapon->xspeed = p->position.xspeed;
     weapon->yspeed = p->position.yspeed;
     weapon->type = pos->weapon.type;
@@ -878,6 +903,8 @@ local void OnPPK(Player *p, const struct C2SPosition *pos) {
         weapon->max_damage = ad->config.bomb_damage_level;
         
         weapon->speed = ad->config.bomb_speed[p->p_ship];
+        weapon->x = pos->x + (radius * 2) * cos(weapon->rotation);
+        weapon->y = pos->y - (radius * 2) * sin(weapon->rotation);
     }
     
     if (weapon->type == W_BULLET || weapon->type == W_BOUNCEBULLET) {
@@ -886,6 +913,8 @@ local void OnPPK(Player *p, const struct C2SPosition *pos) {
         
         if (ad->config.bullet_exact_damage == 0)
             weapon->max_damage = prng->Number(1, weapon->max_damage);
+        weapon->x = pos->x + radius * cos(weapon->rotation);
+        weapon->y = pos->y - radius * sin(weapon->rotation);
     }
     
     weapon->created = current_ticks();
@@ -995,6 +1024,7 @@ local void ReadConfig(Arena* arena) {
     ad->config.bomb_alive_time = config->GetInt(arena->cfg, "Bomb", "BombAliveTime", 8000);
     ad->config.bomb_damage_level = config->GetInt(arena->cfg, "Bomb", "BombDamageLevel", 7500);
     ad->config.bomb_explode_pixels = config->GetInt(arena->cfg, "Bomb", "BombExplodePixels", 80);
+    ad->config.bomb_explode_delay = config->GetInt(arena->cfg, "Bomb", "BombExplodeDelay", 2);
     ad->config.proximity_distance = config->GetInt(arena->cfg, "Bomb", "ProximityDistance", 3);
     
     ad->config.repel_distance = config->GetInt(arena->cfg, "Repel", "RepelDistance", 512);
@@ -1019,7 +1049,7 @@ local void Ccreateai(const char *command, const char *params, Player *p, const T
     AIPlayer* aip = CreateAI(p->arena, params, 100, 1);
     
     if (!aip)
-        chat->SendMessage(p, "Failed to create fake player for ai player.");
+        chat->SendMessage(p, "Failed to create AI player.");
     else
         chat->SendMessage(p, "Created new ai player.");
 }
@@ -1147,7 +1177,7 @@ EXPORT int MM_ai(int action, Imodman *mm_, Arena* arena) {
             pthread_mutexattr_settype(&ad->pthread_attr, PTHREAD_MUTEX_RECURSIVE);
             
             if (pthread_mutex_init(&ad->mutex, &ad->pthread_attr) != 0) {
-                lm->Log(L_ERROR, "<%s> Failed to create pthread mutex.", MODULE_NAME);
+                lm->LogA(L_ERROR, MODULE_NAME, arena, "Failed to create pthread mutex.");
                 break;
             }
             
