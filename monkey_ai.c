@@ -3,6 +3,7 @@
 #include "asss.h"
 #include "fake.h"
 #include "packets/kill.h"
+#include "monkey_pathing.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -21,6 +22,7 @@ local Iconfig *config;
 local Imapdata *map;
 local Iprng *prng;
 local Inet *net;
+local Ipathing *path;
 
 #define MODULE_NAME "monkey_ai"
 #define UPDATE_FREQUENCY 25
@@ -193,6 +195,8 @@ local AIPlayer *CreateAI(Arena *arena, const char *name, int freq, int ship) {
     int x, y;
     GetSpawnPoint(arena, freq, &x, &y);
     
+    aip->path = LLAlloc();
+    aip->last_pathing = 0;
     aip->ship = ship;
     aip->x = x * 16;
     aip->y = y * 16;
@@ -212,7 +216,7 @@ local AIPlayer *CreateAI(Arena *arena, const char *name, int freq, int ship) {
     pthread_mutex_lock(&ad->mutex);
     aip->energy = ad->config.initial_energy[aip->ship];
     aip->recharge = ad->config.initial_recharge[aip->ship];
-    aip->target = NULL;
+    aip->target.type = TargetNone;
     
     Player *fp = fake->CreateFakePlayer(aip->name, arena, aip->ship, freq);
 
@@ -754,9 +758,18 @@ local void DoTick(Arena *arena) {
             }
         }
         
-        if (aip->target) {
-            int dx = aip->target->position.x - aip->x;
-            int dy = aip->target->position.y - aip->y;
+        if (aip->target.type != TargetNone) {
+            int tarx, tary;
+            
+            if (aip->target.type == TargetPlayer) {
+                tarx = aip->target.player->position.x;
+                tary = aip->target.player->position.y;
+            } else {
+                tarx = aip->target.position.x;
+                tary = aip->target.position.y;
+            }
+            int dx = tarx - aip->x;
+            int dy = tary - aip->y;
 
             double angle = atan2(dy, dx);
             
@@ -825,6 +838,12 @@ local void DoTick(Arena *arena) {
     pthread_mutex_unlock(&ad->mutex);
 }
 
+int NearOther(int x, int y, int x2, int y2, int r) {
+    int dx = x - x2;
+    int dy = y - y2;
+    return sqrt(dx * dx + dy * dy) <= r;
+}
+
 /*****************************/
 
 /** Timer to update the bots.
@@ -886,7 +905,36 @@ local int UpdateTimer(void *param) {
             continue;
         }
         
-        aip->target = GetTargetPlayer(aip);
+        if (aip->target.type != TargetPlayer && current_ticks() > aip->last_pathing + 100) {
+            if (aip->path)
+                LLFree(aip->path);
+            aip->path = path->FindPath(arena, aip->x / 16, aip->y / 16, 545, 535);
+            aip->last_pathing = current_ticks();
+        }
+        
+        Player *tar = GetTargetPlayer(aip);
+        if (tar) {
+            aip->target.type = TargetPlayer;
+            aip->target.player = tar;
+        } else {
+            if (!LLIsEmpty(aip->path)) {
+                Node *head = LLGetHead(aip->path)->data;
+                aip->target.type = TargetPosition;
+                if (NearOther(aip->x / 16, aip->y / 16, head->x, head->y, 4)) {
+                    LLRemoveFirst(aip->path);
+                    if (LLIsEmpty(aip->path)) {
+                        aip->target.type = TargetNone;
+                        continue;
+                    }
+                    head = LLGetHead(aip->path)->data;
+                }
+                aip->target.position.x = head->x * 16;
+                aip->target.position.y = head->y * 16;
+                lm->Log(L_INFO, "Target: %d, %d (%d)", head->x, head->y, LLCount(aip->path));
+            } else {
+                aip->target.type = TargetNone;
+            }
+        }
 
         double angle = aip->rotation * 180 / M_PI;
         int rot = (angle / 9) + 10;
@@ -899,7 +947,7 @@ local int UpdateTimer(void *param) {
         ppk.xspeed = aip->xspeed;
         ppk.yspeed = aip->yspeed;
         
-        if (!aip->target || InSafe(arena, ppk.x / 16, ppk.y / 16))
+        if (aip->target.type != TargetPlayer || InSafe(arena, ppk.x / 16, ppk.y / 16))
             ppk.weapon.type = W_NULL;
 
         game->FakePosition(aip->player, &ppk, sizeof(ppk));
@@ -1203,13 +1251,15 @@ local int GetInterfaces(Imodman *mm_) {
     map = mm->GetInterface(I_MAPDATA, ALLARENAS);
     prng = mm->GetInterface(I_PRNG, ALLARENAS);
     net = mm->GetInterface(I_NET, ALLARENAS);
+    path = mm->GetInterface(I_PATHING, ALLARENAS);
 
-    if (!(fake && lm && aman && chat && cmd && ml && game && pd && config && map && prng && net))
+    if (!(fake && lm && aman && chat && cmd && ml && game && pd && config && map && prng && net && path))
         mm = NULL;
     return mm != NULL;
 }
 
 local void ReleaseInterfaces(Imodman* mm_) {
+    mm_->ReleaseInterface(path);
     mm_->ReleaseInterface(net);
     mm_->ReleaseInterface(prng);
     mm_->ReleaseInterface(map);

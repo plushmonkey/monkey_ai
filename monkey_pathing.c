@@ -280,7 +280,7 @@ LinkedList* FindPath(Arena *arena, short startX, short startY, short endX, short
         
         if (current == goal) {
             while (current) {
-                LLAdd(path, current);
+                LLAddFirst(path, current);
                 current = current->parent;
             }
             return path;

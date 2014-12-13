@@ -15,6 +15,25 @@ typedef int (*WeaponUpdate)(struct EnemyWeapon *, int);
  */
 typedef int (*WeaponDamageFunc)(struct AIPlayer *, struct EnemyWeapon *);
 
+typedef enum {
+    TargetNone,
+    TargetPosition,
+    TargetPlayer
+} TargetType;
+
+typedef struct AITarget {
+    union {
+        struct {
+            int x;
+            int y;
+        } position;
+        
+        Player *player;
+    };
+    
+    TargetType type;
+} AITarget;
+
 /** The data that's associated with each ai player. */
 typedef struct AIPlayer {
     /** The name of this ai player. */
@@ -27,7 +46,14 @@ typedef struct AIPlayer {
     Player *player;
 
     /** The player that this ai player is targeting. */
-    Player *target;
+    //Player *target;
+    
+    /** The player's target, either a position of an asss player. */
+    AITarget target;
+    
+    LinkedList *path;
+    
+    int last_pathing;
 
     /** The x position in pixels. */
     double x;
