@@ -1,10 +1,10 @@
 #include "asss.h"
 #include "monkey_ai.h"
+#include "monkey_pathing.h"
 
 /* Test code at the moment */
 
 local Imodman *mm;
-local Ilogman *lm;
 local Iarenaman *aman;
 local Ichat *chat;
 local Icmdman *cmd;
@@ -13,6 +13,7 @@ local Iplayerdata *pd;
 local Iconfig *config;
 local Iai *ai;
 local Ilogman *lm;
+local Ipathing *path;
 
 local int GetInterfaces(Imodman *mm_) {
     mm = mm_;
@@ -25,15 +26,15 @@ local int GetInterfaces(Imodman *mm_) {
     pd = mm->GetInterface(I_PLAYERDATA, ALLARENAS);
     config = mm->GetInterface(I_CONFIG, ALLARENAS);
     ai = mm->GetInterface(I_AI, ALLARENAS);
-    lm = mm->GetInterface(I_LOGMAN, ALLARENAS);
+    path = mm->GetInterface(I_PATHING, ALLARENAS);
 
-    if (!(lm && aman && chat && cmd && game && pd && config && ai && lm))
+    if (!(lm && aman && chat && cmd && game && pd && config && ai && path))
         mm = NULL;
     return mm != NULL;
 }
 
 local void ReleaseInterfaces(Imodman* mm_) {
-    mm_->ReleaseInterface(lm);
+    mm_->ReleaseInterface(path);
     mm_->ReleaseInterface(ai);
     mm_->ReleaseInterface(config);
     mm_->ReleaseInterface(pd);
@@ -41,6 +42,7 @@ local void ReleaseInterfaces(Imodman* mm_) {
     mm_->ReleaseInterface(cmd);
     mm_->ReleaseInterface(chat);
     mm_->ReleaseInterface(aman);
+    mm_->ReleaseInterface(lm);
     mm = NULL;
 }
 
@@ -78,7 +80,18 @@ EXPORT int MM_zombies(int action, Imodman *mm_, Arena* arena) {
             
             ai->SetDamageFunction(test_player, W_BULLET, ZBulletDamage);
             ai->SetDamageFunction(test_player, W_BOUNCEBULLET, ZBulletDamage);
+            
+            LinkedList *pathlist = path->FindPath(arena, 512, 512, 545, 535);
+            Node *p;
+            Link *link;
+            
+            FOR_EACH(pathlist, p, link) {
+                lm->Log(L_INFO, "Path: %d, %d", p->x, p->y);
+            }
+            
+            lm->Log(L_INFO, "Path size: %d", LLCount(pathlist));
 
+            LLFree(pathlist);
             rv = MM_OK;
         }
         break;
