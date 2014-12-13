@@ -48,6 +48,7 @@ typedef struct {
 
     /* Whether ships fire with double barrel bullets. */
     int double_barrel[8];
+    
     /** The bomb speed for each ship. */
     int bomb_speed[8];
 
@@ -154,6 +155,9 @@ local void ReadConfig(Arena* arena);
 local void DestroyAIPlayer(LinkedList *players, AIPlayer *aip);
 local void GetSpawnPoint(Arena *arena, int freq, int *spawnx, int *spawny);
 int InSafe(Arena *arena, int x, int y);
+int BulletDamage(AIPlayer *aip, EnemyWeapon *weapon);
+int BombDamage(AIPlayer *aip, EnemyWeapon *weapon);
+int RepelDamage(AIPlayer *aip, EnemyWeapon *weapon);
 
 /************************/
 
@@ -167,6 +171,13 @@ local void Lock(Arena *arena) {
 local void Unlock(Arena *arena) {
     AIArenaData *ad = P_ARENA_DATA(arena, adkey);
     pthread_mutex_unlock(&ad->mutex);
+}
+
+/* Defined in interface */
+local void SetDamageFunction(AIPlayer *aip, short weapon_type, WeaponDamageFunc func) {
+    Lock(aip->player->arena);
+    aip->damage_funcs[weapon_type] = func;
+    Unlock(aip->player->arena);
 }
 
 /* Defined in interface */
@@ -193,6 +204,10 @@ local AIPlayer *CreateAI(Arena *arena, const char *name, int freq, int ship) {
     aip->last_hitter = NULL;
     aip->dead = 0;
     aip->time_died = 0;
+    aip->damage_funcs[W_BULLET] = aip->damage_funcs[W_BOUNCEBULLET] = BulletDamage;
+    aip->damage_funcs[W_BOMB] = aip->damage_funcs[W_PROXBOMB] = BombDamage;
+    aip->damage_funcs[W_REPEL] = RepelDamage;
+    aip->damage_funcs[W_BURST] = BulletDamage;
     
     pthread_mutex_lock(&ad->mutex);
     aip->energy = ad->config.initial_energy[aip->ship];
@@ -347,9 +362,8 @@ local Player *GetTargetPlayer(AIPlayer *aip) {
  * Arena mutex should always be locked before calling this.
  * @param arena The arena where the collision happened.
  * @param weapon The weapon that collided.
- * @param aip Optional ai player that will be ignored.
  */
-local void DoSplashDamage(Arena *arena, EnemyWeapon *weapon, AIPlayer *aip) {
+local void DoBombDamage(Arena *arena, EnemyWeapon *weapon) {
     AIArenaData *ad = P_ARENA_DATA(arena, adkey);
     
     int radius = ad->config.bomb_explode_pixels + ad->config.bomb_explode_pixels * weapon->level;
@@ -357,22 +371,59 @@ local void DoSplashDamage(Arena *arena, EnemyWeapon *weapon, AIPlayer *aip) {
     AIPlayer *p;
     Link *link;
     
-    FOR_EACH(&ad->players, p, link) {
-        if (p == aip) continue;
-        if (InSafe(arena, p->x / 16, p->y / 16)) continue;
-        
+    FOR_EACH(&ad->players, p, link) {       
         int dx = p->x - weapon->x;
         int dy = p->y - weapon->y;
         
         double dist = sqrt(dx * dx + dy * dy);
         
-        if (dist < radius) {
-            double damage = (radius - dist) / radius * ad->config.bomb_damage_level;
-            p->energy -= damage;
-            
-            p->last_weapon = weapon;
-        }
+        if (dist < radius)
+            p->energy -= p->damage_funcs[weapon->type](p, weapon);
     }
+}
+
+/** Calculate the weapon damage when hit by a bullet/burst
+ * @param aip The AI player that is being hit.
+ * @param weapon The weapon that hit the AI player.
+ * @return the amount of damage to deal.
+ */
+int BulletDamage(AIPlayer *aip, EnemyWeapon *weapon) {
+    return weapon->max_damage;
+}
+
+/** Calculate the weapon damage when hit by a bomb/prox.
+ * @param aip The AI player that is being hit.
+ * @param weapon The weapon that hit the AI player.
+ * @return the amount of damage to deal.
+ */
+int BombDamage(AIPlayer *aip, EnemyWeapon *weapon) {
+    Arena *arena = aip->player->arena;
+    if (InSafe(arena, aip->x / 16, aip->y / 16))
+        return 0;
+        
+    AIArenaData *ad = P_ARENA_DATA(arena, adkey);
+    int radius = ad->config.bomb_explode_pixels + ad->config.bomb_explode_pixels * weapon->level;
+    
+    int dx = aip->x - weapon->x;
+    int dy = aip->y - weapon->y;
+    
+    double dist = sqrt(dx * dx + dy * dy);
+    
+    int damage = 0;
+    if (dist < radius)
+        damage = floor(((radius - dist) / radius) * ad->config.bomb_damage_level);
+    
+    lm->Log(L_INFO, "Doing %d bomb damage to %s.", damage, aip->name);
+    return damage;
+}
+
+/** Calculate the weapon damage when hit by a repel.
+ * @param aip The AI player that is being hit.
+ * @param weapon The weapon that hit the AI player.
+ * @return the amount of damage to deal.
+ */
+int RepelDamage(AIPlayer *aip, EnemyWeapon *weapon) {
+    return 0;
 }
 
 /** Checks for weapon/player collisions.
@@ -387,9 +438,7 @@ local void CheckWeaponHit(AIPlayer *aip) {
     
     // Used for bomb calculations
     double ed = ad->config.bomb_explode_delay;
-    double nx = aip->x + ((aip->xspeed / 10) * (ed / 100.0));
-    double ny = aip->y + ((aip->yspeed / 10) * (ed / 100.0));
-    
+
     FOR_EACH(&ad->weapons, weapon, link) {
         if (weapon->active == 0 || weapon->destroy == 1) continue;
         if (weapon->shooter->p_freq == aip->freq) continue;
@@ -404,35 +453,49 @@ local void CheckWeaponHit(AIPlayer *aip) {
             hit_dist = ship_radius + prox_dist * 16;
         }
         
-        double wx = weapon->x;
-        double wy = weapon->y;
-
-        double x = aip->x + ((aip->xspeed / 10) * UPDATE_FREQUENCY / 100.0);
-        double y = aip->y + ((aip->yspeed / 10) * UPDATE_FREQUENCY / 100.0);
-
-        double dx = wx - x;
-        double dy = wy - y;
+        double x = aip->x;
+        double y = aip->y;
+        
+        if (weapon->type == W_BOMB || weapon->type == W_PROXBOMB) {
+            x += (aip->xspeed / 10) * (UPDATE_FREQUENCY / 100.0);
+            y += (aip->yspeed / 10) * (UPDATE_FREQUENCY / 100.0);
+        }
+        
+        double dx = weapon->x - x;
+        double dy = weapon->y - y;
 
         double dist = sqrt(dx * dx + dy * dy);
         
         if (dist <= hit_dist) {
-            int damage = weapon->max_damage;
-            
-            if (weapon->type == W_BOMB || weapon->type == W_PROXBOMB) {
+            if (weapon->type == W_PROXBOMB) {
                 // Move weapon position and player position by the bomb explode delay then calculate damage.
-                double nwx = weapon->x + cos(weapon->rotation) * (ed / 100.0) + ((weapon->xspeed / 10) * (ed / 100.0));
-                double nwy = weapon->y - sin(weapon->rotation) * (ed / 100.0) - ((weapon->yspeed / 10) * (ed / 100.0));;
-                double ndx = nwx - nx;
-                double ndy = nwy - ny;
-                double ndist = sqrt(ndx * ndx + ndy * ndy);
+                weapon->x = weapon->x + cos(weapon->rotation) * (ed / 100.0) + ((weapon->xspeed / 10) * (ed / 100.0));
+                weapon->y = weapon->y - sin(weapon->rotation) * (ed / 100.0) - ((weapon->yspeed / 10) * (ed / 100.0));
                 
-                if (ndist > dist) ndist = dist;
-                // This is mostly just random bomb damage atm. Do at least 30% bomb damage
-                damage = fmax(0.3, fmin(1.0, ((hit_dist - ndist) / hit_dist) + (prng->Number(0, 10) / 10.0))) * damage;
-                DoSplashDamage(aip->player->arena, weapon, aip);
+                double old_x = aip->x;
+                double old_y = aip->y;
+                aip->x = x + ((aip->xspeed / 10) * (ed / 100.0));
+                aip->y = y + ((aip->yspeed / 10) * (ed / 100.0));
+                
+                DoBombDamage(aip->player->arena, weapon);
+                
+                // Move AI player back to where they were.
+                aip->x = old_x;
+                aip->y = old_y;
+            } else if (weapon->type == W_BOMB) {
+                double old_x = aip->x;
+                double old_y = aip->y;
+                aip->x = x;
+                aip->y = y;
+                
+                DoBombDamage(aip->player->arena, weapon);
+                // Move AI player back to where they were.
+                aip->x = old_x;
+                aip->y = old_y;
+            } else {
+                aip->energy -= aip->damage_funcs[weapon->type](aip, weapon);
             }
             
-            aip->energy -= damage;
             aip->last_hitter = weapon->shooter;
 
             FlagWeaponForDestroy(aip->player->arena, weapon);
@@ -528,13 +591,14 @@ int TraceWeapon(EnemyWeapon *weapon, int dt) {
 
         if (solid) {
             if (weapon->type == W_BOMB || weapon->type == W_PROXBOMB) {
-                if (weapon->bouncing && weapon->bounces_left-- <= 0)
+                if ((weapon->bouncing && weapon->bounces_left-- <= 0) || !weapon->bouncing) {
+                    DoBombDamage(arena, weapon);
                     break;
+                }
             }
             
             if (weapon->bouncing) {
-                // flip the rotation of the bullet when it collides with a tile
-                
+                // flip the rotation of the weapon when it collides with a tile
                 if (weapon->type == W_BURST && weapon->active == 0)
                     weapon->active = 1;
                 
@@ -552,11 +616,15 @@ int TraceWeapon(EnemyWeapon *weapon, int dt) {
                 double c = cos(weapon->rotation);
                 double s = sin(weapon->rotation);
                 
-                if (horizontal)
+                if (horizontal) {
                     s = -s;
+                    weapon->yspeed *= -1;
+                }
                     
-                if (vertical)
+                if (vertical) {
                     c = -c;
+                    weapon->xspeed *= -1;
+                }
                 
                 weapon->rotation = atan2(s, c);
                 
@@ -655,9 +723,6 @@ local void DoTick(Arena *arena) {
         }
 
         if (weapon->update(weapon, 1)) {
-            if (weapon->type == W_BOMB || weapon->type == W_PROXBOMB)
-                DoSplashDamage(arena, weapon, NULL);
-            
             FlagWeaponForDestroy(arena, weapon);
             continue;
         }
@@ -696,7 +761,7 @@ local void DoTick(Arena *arena) {
             double angle = atan2(dy, dx);
             
             aip->rotation = angle;
-
+            
             // Apply thrust
             aip->xspeed += thrust * cos(angle) * (1.0 / 100.0);
             aip->yspeed += thrust * sin(angle) * (1.0 / 100.0);
@@ -709,11 +774,37 @@ local void DoTick(Arena *arena) {
             double yinc = (aip->yspeed / 10) * (1.0 / 100.0);
             
             if (IsSolid(arena, (aip->x + xinc) / 16, (aip->y + yinc) / 16)) {
-                // todo: better physics. This just flips the xspeed and yspeed bouncing them straight backwards.
-                aip->xspeed *= -0.7;
-                aip->yspeed *= -0.7;
-                xinc = (aip->xspeed / 10) * (1.0 / 100.0);
-                yinc = (aip->yspeed / 10) * (1.0 / 100.0);
+                // Bounce off of the tile
+                int last_tile_x = floor(aip->x / 16);
+                int last_tile_y = floor(aip->y / 16);
+                int tile_x = floor(aip->x + xinc) / 16;
+                int tile_y = floor(aip->y + yinc) / 16;
+                
+                int tiledx = tile_x - last_tile_x;
+                int tiledy = tile_y - last_tile_y;
+                
+                double x = aip->x + xinc;
+                double y = aip->y + yinc;
+                
+                int below = (int)(floor(y)) % 16 < 3;
+                int above = (int)(floor(y)) % 16 > 13;
+                int right = (int)(floor(x)) % 16 < 3;
+                int left = (int)(floor(x)) % 16 > 13;
+                
+                int horizontal = (below && tiledy > 0) || (above && tiledy < 0);
+                int vertical = (right && tiledx > 0) || (left && tiledx < 0);
+                
+                const double BounceFactor = -0.6;
+                
+                if (horizontal) {
+                    yinc *= -1;
+                    aip->yspeed *= BounceFactor;
+                }
+                
+                if (vertical) {
+                    xinc *= -1;
+                    aip->xspeed *= BounceFactor;
+                }
             }
 
             // Increase bot's actual position
@@ -841,7 +932,7 @@ local void OnPPK(Player *p, const struct C2SPosition *pos) {
         weapon->created = current_ticks();
         weapon->arena = arena;
         weapon->parent = NULL;
-        weapon->update = &UpdateRepel;
+        weapon->update = UpdateRepel;
         weapon->shooter = p;
         weapon->active = 1;
         weapon->level = 0;
@@ -865,7 +956,7 @@ local void OnPPK(Player *p, const struct C2SPosition *pos) {
             weapon->created = current_ticks();
             weapon->arena = arena;
             weapon->parent = NULL;
-            weapon->update = &TraceWeapon;
+            weapon->update = TraceWeapon;
             weapon->shooter = p;
             weapon->active = 0;
             weapon->max_damage = ad->config.burst_damage_level;
@@ -903,10 +994,11 @@ local void OnPPK(Player *p, const struct C2SPosition *pos) {
     if (weapon->type == W_BOMB || weapon->type == W_PROXBOMB) {
         weapon->bounces_left = ad->config.bounce_count[p->p_ship];
         weapon->max_damage = ad->config.bomb_damage_level;
+        weapon->bouncing = weapon->bounces_left > 0;
         
         weapon->speed = ad->config.bomb_speed[p->p_ship];
-        weapon->x = pos->x + (radius * 2) * cos(weapon->rotation);
-        weapon->y = pos->y - (radius * 2) * sin(weapon->rotation);
+        weapon->x = pos->x;
+        weapon->y = pos->y;
     }
     
     if (weapon->type == W_BULLET || weapon->type == W_BOUNCEBULLET) {
@@ -917,13 +1009,13 @@ local void OnPPK(Player *p, const struct C2SPosition *pos) {
             weapon->max_damage = prng->Number(1, weapon->max_damage);
         weapon->x = pos->x + radius * cos(weapon->rotation);
         weapon->y = pos->y - radius * sin(weapon->rotation);
+        weapon->bouncing = pos->weapon.type == W_BOUNCEBULLET;
     }
     
     weapon->created = current_ticks();
     weapon->arena = arena;
-    weapon->bouncing = pos->weapon.type == W_BOUNCEBULLET;
     weapon->parent = NULL;
-    weapon->update = &TraceWeapon;
+    weapon->update = TraceWeapon;
     weapon->shooter = p;
     weapon->active = 1;
     
@@ -1136,7 +1228,7 @@ local void ReleaseInterfaces(Imodman* mm_) {
 local Iai myai =
 {
     INTERFACE_HEAD_INIT(I_AI, "ai")
-    CreateAI, DestroyAI, Lock, Unlock
+    CreateAI, DestroyAI, SetDamageFunction, Lock, Unlock
 };
 
 EXPORT const char info_ai[] = "ai v0.1 by monkey\n";
@@ -1164,7 +1256,7 @@ EXPORT int MM_ai(int action, Imodman *mm_, Arena* arena) {
         break;
         case MM_UNLOAD:
         {
-            if (mm->UnregInterface(&myai, ALLARENAS))
+            if (mm->UnregInterface(&myai, ALLARENAS) > 0)
                 break;
             aman->FreeArenaData(adkey);
             ReleaseInterfaces(mm_);

@@ -3,11 +3,20 @@
 
 #include "asss.h"
 
-struct EnemyWeapon;                                  
+struct EnemyWeapon;           
+struct AIPlayer;
+                       
+/** Function that is called to update a weapon */
 typedef int (*WeaponUpdate)(struct EnemyWeapon *, int);
 
+/** Function that is called to do damage. 
+ * Custom functions can be set per weapon type.
+ * @return The amount of damage that should be dealt to the AI player.
+ */
+typedef int (*WeaponDamageFunc)(struct AIPlayer *, struct EnemyWeapon *);
+
 /** The data that's associated with each ai player. */
-typedef struct {
+typedef struct AIPlayer {
     /** The name of this ai player. */
     char name[24];
     
@@ -55,6 +64,9 @@ typedef struct {
     
     /** The last weapon that hit the ai player. */
     struct EnemyWeapon *last_weapon;
+    
+    /** The function to call per weapon type when damage should be dealt. */
+    WeaponDamageFunc damage_funcs[17];
 } AIPlayer;
 
 /** The data that's associated with each active weapon. */
@@ -159,6 +171,13 @@ typedef struct Iai {
      * @param aip The AI player to destroy.
      */
     void (*DestroyAI)(AIPlayer *aip);
+    
+    /** Sets the function to call when hit by a certain weapon type.
+     * @param aip The AI player
+     * @param weapon_type The weapon type. W_BULLET, W_BOMB, etc
+     * @param func The function that will be called.
+     */
+    void (*SetDamageFunction)(AIPlayer *aip, short weapon_type, WeaponDamageFunc func);
     
     /** Locks the arena mutex. */
     void (*Lock)(Arena *arena);

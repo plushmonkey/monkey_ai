@@ -12,6 +12,7 @@ local Igame *game;
 local Iplayerdata *pd;
 local Iconfig *config;
 local Iai *ai;
+local Ilogman *lm;
 
 local int GetInterfaces(Imodman *mm_) {
     mm = mm_;
@@ -24,13 +25,15 @@ local int GetInterfaces(Imodman *mm_) {
     pd = mm->GetInterface(I_PLAYERDATA, ALLARENAS);
     config = mm->GetInterface(I_CONFIG, ALLARENAS);
     ai = mm->GetInterface(I_AI, ALLARENAS);
+    lm = mm->GetInterface(I_LOGMAN, ALLARENAS);
 
-    if (!(lm && aman && chat && cmd && game && pd && config && ai))
+    if (!(lm && aman && chat && cmd && game && pd && config && ai && lm))
         mm = NULL;
     return mm != NULL;
 }
 
 local void ReleaseInterfaces(Imodman* mm_) {
+    mm_->ReleaseInterface(lm);
     mm_->ReleaseInterface(ai);
     mm_->ReleaseInterface(config);
     mm_->ReleaseInterface(pd);
@@ -39,6 +42,11 @@ local void ReleaseInterfaces(Imodman* mm_) {
     mm_->ReleaseInterface(chat);
     mm_->ReleaseInterface(aman);
     mm = NULL;
+}
+
+local int ZBulletDamage(AIPlayer *aip, EnemyWeapon *weapon) {
+    lm->Log(L_INFO, "Zombie hit by bullet. Ignoring damage.");
+    return 0;
 }
 
 local AIPlayer *test_player;
@@ -66,7 +74,10 @@ EXPORT int MM_zombies(int action, Imodman *mm_, Arena* arena) {
         break;
         case MM_ATTACH:
         {
-            test_player = ai->CreateAI(arena, "zombie", 100, 1);
+            test_player = ai->CreateAI(arena, "*zombie*", 100, 1);
+            
+            ai->SetDamageFunction(test_player, W_BULLET, ZBulletDamage);
+            ai->SetDamageFunction(test_player, W_BOUNCEBULLET, ZBulletDamage);
 
             rv = MM_OK;
         }
