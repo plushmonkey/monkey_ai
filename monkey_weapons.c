@@ -217,11 +217,11 @@ local int CheckWeaponHit(Player *player, EnemyWeapon *weapon) {
     double ed = ad->config.bomb_explode_delay;
     
     int ship_radius = ad->config.radius[player->p_ship];
-    int hit_dist = ship_radius * 2;
+    int hit_dist = ship_radius;
     
     if (weapon->type == W_PROXBOMB) {
         int prox_dist = ad->config.proximity_distance + weapon->level;
-        hit_dist = (ship_radius * 2) + prox_dist * 16;
+        hit_dist = ship_radius + prox_dist * 16;
     }
     
     struct PlayerPosition *pos = &player->position;
