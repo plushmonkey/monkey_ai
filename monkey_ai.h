@@ -2,12 +2,9 @@
 #define MONKEY_AI_H_
 
 #include "asss.h"
+#include "monkey_weapons.h"
 
-struct EnemyWeapon;           
 struct AIPlayer;
-                       
-/** Function that is called to update a weapon */
-typedef int (*WeaponUpdate)(struct EnemyWeapon *, int);
 
 /** Function that is called to do damage. 
  * Custom functions can be set per weapon type.
@@ -94,65 +91,6 @@ typedef struct AIPlayer {
     /** The function to call per weapon type when damage should be dealt. */
     WeaponDamageFunc damage_funcs[17];
 } AIPlayer;
-
-/** The data that's associated with each active weapon. */
-typedef struct EnemyWeapon {
-    /** The arena that this weapon is active in. */
-    Arena *arena;
-
-    /** The x position of this weapon in pixels. */
-    double x;
-
-    /** The y position of this weapon in pixels. */
-    double y;
-    
-    /** How fast the weapon is traveling in the x direction. */
-    double xspeed;
-    
-    /** How fast the weapon is traveling in the y direction. */
-    double yspeed;
-
-    /** The direction this weapon is traveling. */
-    double rotation;
-
-    /** The speed of the weapon in pixels / second * 10. */
-    int speed;
-
-    /** When this weapon was created in ticks. */
-    int created;
-
-    /** 1 if the weapon is bouncing, 0 otherwise. */
-    int bouncing;
-
-    /** Number of bounces left (bombs) */
-    int bounces_left;
-    
-    /** The weapon type. Values are from ppk.h */
-    int type;
-    
-    /** The weapon level. */
-    int level;
-    
-    /** The maximum amount of damage this weapon can cause. */
-    int max_damage;
-    
-    /** The parent weapon of this weapon. Used so only 1 bullet of the set hits. */
-    struct EnemyWeapon *parent;
-    
-    /** Marks the weapon to be destroyed next tick. */
-    int destroy;
-    
-    /** The update function to call every tick.
-     * The weapon is marked as destroy if it returns 1.
-     */
-    WeaponUpdate update;
-    
-    /** The player that shot this weapon. */
-    Player *shooter;
-    
-    /** 1 if the weapon is active, 0 otherwise. */
-    int active;
-} EnemyWeapon;
 
 /** This callback happens when an AI player takes damage. */
 #define CB_AIDAMAGE "aidamage"

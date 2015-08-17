@@ -314,7 +314,9 @@ local BOOL IsSolid(Arena *arena, int x, int y) {
              type == TILE_SAFE ||
              type == TILE_TURF_FLAG ||
              type == TILE_GOAL ||
-            (type >= TILE_OVER_START && type <= TILE_UNDER_END));
+             type == 241 ||
+             type >= 252 ||
+            (type >= TILE_OVER_START && type <= TILE_UNDER_END + 1));
 }
 
 /** Allocates memory for the level grid.

@@ -77,6 +77,12 @@ typedef struct {
     
     /** The initial thrust for each ship. */
     int initial_thrust[8];
+    
+    /** The initial speed for each ship. */
+    int initial_speed[8];
+    
+    /** The maximum speed for each ship. */
+    int max_speed[8];
 
     /** The amount of bullets each bursts releases for each ship. */
     int burst_shrapnel[8];
@@ -132,12 +138,6 @@ typedef struct {
     /** The list of ai players in this arena. */
     LinkedList players;
 
-    /** The list of active weapons in this arena. */
-    LinkedList weapons;
-    
-    /** The list of active weapons to be destroyed next tick. */
-    LinkedList weapons_destroy;
-
     /** The configuration settings for this arena. */
     ArenaConfig config;
 
@@ -156,10 +156,10 @@ local int adkey;
 local void ReadConfig(Arena* arena);
 local void DestroyAIPlayer(LinkedList *players, AIPlayer *aip);
 local void GetSpawnPoint(Arena *arena, int freq, int *spawnx, int *spawny);
-int InSafe(Arena *arena, int x, int y);
-int BulletDamage(AIPlayer *aip, EnemyWeapon *weapon);
-int BombDamage(AIPlayer *aip, EnemyWeapon *weapon);
-int RepelDamage(AIPlayer *aip, EnemyWeapon *weapon);
+local int InSafe(Arena *arena, int x, int y);
+local int BulletDamage(AIPlayer *aip, EnemyWeapon *weapon);
+local int BombDamage(AIPlayer *aip, EnemyWeapon *weapon);
+local int RepelDamage(AIPlayer *aip, EnemyWeapon *weapon);
 
 /************************/
 
@@ -281,43 +281,6 @@ local void GetSpawnPoint(Arena *arena, int freq, int *spawnx, int *spawny) {
     *spawny = spawnY + spawn_dist * sin(spawn_rot);
 }
 
-/** Removes weapon from arena list and frees the memory.
- * @param weapons The list of weapons that are active in the arena.
- * @param weapon The weapon that should be destroyed.
- */
-local void DestroyWeapon(LinkedList *weapons, EnemyWeapon* weapon) {
-    LLRemove(weapons, weapon);
-    afree(weapon);
-}
-
-/** Flags a weapon and its parent / children to be destroyed on next tick.
- * @param arena The arena where the weapon exists.
- * @param weapon The weapon to destroy.
- */
-local void FlagWeaponForDestroy(Arena *arena, EnemyWeapon *weapon) {
-    AIArenaData *ad = P_ARENA_DATA(arena, adkey);
-    
-    pthread_mutex_lock(&ad->mutex);
-    
-    EnemyWeapon *parent = weapon->parent;
-    EnemyWeapon *w;
-    Link *link;
-    
-    FOR_EACH(&ad->weapons, w, link) {
-        if ((w == parent || w->parent == weapon || (parent && w->parent == parent)) && w->destroy == 0) {
-            w->destroy = 1;
-            LLAdd(&ad->weapons_destroy, w);
-        }
-    }
-    
-    if (weapon->destroy == 0) {
-        weapon->destroy = 1;
-        LLAdd(&ad->weapons_destroy, weapon);
-    }
-    
-    pthread_mutex_unlock(&ad->mutex);
-}
-
 /** Removes ai player from arena list and frees the memory.
  * @param players The list of ai players in the arena.
  * @param aip The AI player that should be destroyed.
@@ -362,36 +325,12 @@ local Player *GetTargetPlayer(AIPlayer *aip) {
     return target;
 }
 
-/** Does damage to all of the ai players near a bomb.
- * Arena mutex should always be locked before calling this.
- * @param arena The arena where the collision happened.
- * @param weapon The weapon that collided.
- */
-local void DoBombDamage(Arena *arena, EnemyWeapon *weapon) {
-    AIArenaData *ad = P_ARENA_DATA(arena, adkey);
-    
-    int radius = ad->config.bomb_explode_pixels + ad->config.bomb_explode_pixels * weapon->level;
-    
-    AIPlayer *p;
-    Link *link;
-    
-    FOR_EACH(&ad->players, p, link) {       
-        int dx = p->x - weapon->x;
-        int dy = p->y - weapon->y;
-        
-        double dist = sqrt(dx * dx + dy * dy);
-        
-        if (dist < radius)
-            p->energy -= p->damage_funcs[weapon->type](p, weapon);
-    }
-}
-
 /** Calculate the weapon damage when hit by a bullet/burst
  * @param aip The AI player that is being hit.
  * @param weapon The weapon that hit the AI player.
  * @return the amount of damage to deal.
  */
-int BulletDamage(AIPlayer *aip, EnemyWeapon *weapon) {
+local int BulletDamage(AIPlayer *aip, EnemyWeapon *weapon) {
     return weapon->max_damage;
 }
 
@@ -400,7 +339,7 @@ int BulletDamage(AIPlayer *aip, EnemyWeapon *weapon) {
  * @param weapon The weapon that hit the AI player.
  * @return the amount of damage to deal.
  */
-int BombDamage(AIPlayer *aip, EnemyWeapon *weapon) {
+local int BombDamage(AIPlayer *aip, EnemyWeapon *weapon) {
     Arena *arena = aip->player->arena;
     if (InSafe(arena, aip->x / 16, aip->y / 16))
         return 0;
@@ -426,90 +365,8 @@ int BombDamage(AIPlayer *aip, EnemyWeapon *weapon) {
  * @param weapon The weapon that hit the AI player.
  * @return the amount of damage to deal.
  */
-int RepelDamage(AIPlayer *aip, EnemyWeapon *weapon) {
+local int RepelDamage(AIPlayer *aip, EnemyWeapon *weapon) {
     return 0;
-}
-
-/** Checks for weapon/player collisions.
- * @param aip The AI player that is being checked for weapon collisions.
- */
-local void CheckWeaponHit(AIPlayer *aip) {
-    AIArenaData *ad = P_ARENA_DATA(aip->player->arena, adkey);
-    Link *link;
-    EnemyWeapon *weapon;
-
-    pthread_mutex_lock(&ad->mutex);
-    
-    // Used for bomb calculations
-    double ed = ad->config.bomb_explode_delay;
-
-    FOR_EACH(&ad->weapons, weapon, link) {
-        if (weapon->active == 0 || weapon->destroy == 1) continue;
-        if (weapon->shooter->p_freq == aip->freq) continue;
-        if (weapon->shooter == aip->player) continue;
-        if (weapon->type == W_REPEL) continue;
-        
-        int ship_radius = ad->config.radius[aip->ship];
-        int hit_dist = ship_radius * 2;
-        
-        if (weapon->type == W_PROXBOMB) {
-            int prox_dist = ad->config.proximity_distance + weapon->level;
-            hit_dist = ship_radius + prox_dist * 16;
-        }
-        
-        double x = aip->x;
-        double y = aip->y;
-        
-        if (weapon->type == W_BOMB || weapon->type == W_PROXBOMB) {
-            x += (aip->xspeed / 10) * (UPDATE_FREQUENCY / 100.0);
-            y += (aip->yspeed / 10) * (UPDATE_FREQUENCY / 100.0);
-        }
-        
-        double dx = weapon->x - x;
-        double dy = weapon->y - y;
-
-        double dist = sqrt(dx * dx + dy * dy);
-        
-        if (dist <= hit_dist) {
-            if (weapon->type == W_PROXBOMB) {
-                // Move weapon position and player position by the bomb explode delay then calculate damage.
-                weapon->x = weapon->x + cos(weapon->rotation) * (ed / 100.0) + ((weapon->xspeed / 10) * (ed / 100.0));
-                weapon->y = weapon->y - sin(weapon->rotation) * (ed / 100.0) - ((weapon->yspeed / 10) * (ed / 100.0));
-                
-                double old_x = aip->x;
-                double old_y = aip->y;
-                aip->x = x + ((aip->xspeed / 10) * (ed / 100.0));
-                aip->y = y + ((aip->yspeed / 10) * (ed / 100.0));
-                
-                DoBombDamage(aip->player->arena, weapon);
-                
-                // Move AI player back to where they were.
-                aip->x = old_x;
-                aip->y = old_y;
-            } else if (weapon->type == W_BOMB) {
-                double old_x = aip->x;
-                double old_y = aip->y;
-                aip->x = x;
-                aip->y = y;
-                
-                DoBombDamage(aip->player->arena, weapon);
-                // Move AI player back to where they were.
-                aip->x = old_x;
-                aip->y = old_y;
-            } else {
-                aip->energy -= aip->damage_funcs[weapon->type](aip, weapon);
-            }
-            
-            aip->last_hitter = weapon->shooter;
-
-            FlagWeaponForDestroy(aip->player->arena, weapon);
-            
-            aip->last_weapon = weapon;
-            DO_CBS(CB_AIDAMAGE, aip->player->arena, AIDamageFunc, (aip, weapon));
-        }
-    }
-    
-    pthread_mutex_unlock(&ad->mutex);
 }
 
 /** Determines if the tile x, y is solid.
@@ -518,136 +375,25 @@ local void CheckWeaponHit(AIPlayer *aip) {
  * @param y The y tile to check.
  * @return Returns 1 if it is solid, 0 otherwise.
  */
-int IsSolid(Arena* arena, int x, int y) {
+local int IsSolid(Arena *arena, int x, int y) {
     enum map_tile_t type = map->GetTile(arena, x, y);
 
     return !(type == TILE_NONE || 
              type == TILE_SAFE ||
              type == TILE_TURF_FLAG ||
              type == TILE_GOAL ||
-            (type >= TILE_OVER_START && type <= TILE_UNDER_END));
+             type == 241 ||
+             type >= 252 ||
+            (type >= TILE_OVER_START && type <= TILE_UNDER_END + 1));
 }
-
 /** Determines if the tile x, y is in a safe zone.
  * @param arena The current arena.
  * @param x The x tile to check.
  * @param y The y tile to check.
  * @return Returns 1 if it is a safe tile, 0 otherwise.
  */
-int InSafe(Arena *arena, int x, int y) {
+local int InSafe(Arena *arena, int x, int y) {
     return map->GetTile(arena, x, y) == TILE_SAFE;
-}
-
-/** Traces along the weapon's path
- * @param weapon The weapon is that is being traced.
- * @param dt The timestep.
- * @return Returns 1 if wall collision happened, 0 otherwise.
- */
-int TraceWeapon(EnemyWeapon *weapon, int dt) {
-    Arena *arena = weapon->arena;
-    AIArenaData *ad = P_ARENA_DATA(arena, adkey);
-
-    // Stop moving if it hits a wall and not bouncing
-    double x = weapon->x;
-    double y = weapon->y;
-    int solid = 0;
-
-    double dist = (weapon->speed / 10.0) * (dt / 100.0);
-    double xtravel = weapon->xspeed / 10 * (dt / 100.0);
-    double ytravel = weapon->yspeed / 10 * (dt / 100.0);
-    
-    int tile_x = 0;
-    int tile_y = 0;
-    int last_tile_x = floor(x / 16.0);
-    int last_tile_y = floor(y / 16.0);
-    
-    int ticks = current_ticks();
-    
-    pthread_mutex_lock(&ad->mutex);
-    
-    if (weapon->type == W_BULLET || weapon->type == W_BOUNCEBULLET || weapon->type == W_BURST) {
-        if (ticks - weapon->created >= ad->config.bullet_alive_time) {
-            // weapon time out
-            FlagWeaponForDestroy(arena, weapon);
-            pthread_mutex_unlock(&ad->mutex);
-            return 0;
-        }
-    } else if (weapon->type == W_BOMB || weapon->type == W_PROXBOMB) {
-        if (ticks - weapon->created >= ad->config.bomb_alive_time) {
-            // weapon time out
-            FlagWeaponForDestroy(arena, weapon);
-            pthread_mutex_unlock(&ad->mutex);
-            return 0;
-        }
-    }
- 
-    for (int i = 0; i < dist; ++i) {
-        x += cos(weapon->rotation) + xtravel / dist;
-        y -= sin(weapon->rotation) - ytravel / dist;
-        
-        tile_x = floor(x / 16.0);
-        tile_y = floor(y / 16.0);
-        
-        if (tile_x == last_tile_x && tile_y == last_tile_y)
-            continue;
-            
-        solid = IsSolid(arena, tile_x, tile_y);
-
-        if (solid) {
-            if (weapon->type == W_BOMB || weapon->type == W_PROXBOMB) {
-                if ((weapon->bouncing && weapon->bounces_left-- <= 0) || !weapon->bouncing) {
-                    DoBombDamage(arena, weapon);
-                    break;
-                }
-            }
-            
-            if (weapon->bouncing) {
-                // flip the rotation of the weapon when it collides with a tile
-                if (weapon->type == W_BURST && weapon->active == 0)
-                    weapon->active = 1;
-                
-                int dx = tile_x - last_tile_x;
-                int dy = tile_y - last_tile_y;
-                
-                int below = (int)(floor(y)) % 16 < 3;
-                int above = (int)(floor(y)) % 16 > 13;
-                int right = (int)(floor(x)) % 16 < 3;
-                int left = (int)(floor(x)) % 16 > 13;
-                
-                int horizontal = (below && dy > 0) || (above && dy < 0);
-                int vertical = (right && dx > 0) || (left && dx < 0);
-                
-                double c = cos(weapon->rotation);
-                double s = sin(weapon->rotation);
-                
-                if (horizontal) {
-                    s = -s;
-                    weapon->yspeed *= -1;
-                }
-                    
-                if (vertical) {
-                    c = -c;
-                    weapon->xspeed *= -1;
-                }
-                
-                weapon->rotation = atan2(s, c);
-                
-                solid = 0;
-            } else {
-                break;
-            }
-        }
-
-        last_tile_x = tile_x;
-        last_tile_y = tile_y;
-    }
-
-    weapon->x = x;
-    weapon->y = y;
-    
-    pthread_mutex_unlock(&ad->mutex);
-    
-    return solid;
 }
 
 /** Pushes any ai players inside the repel radius.
@@ -655,7 +401,7 @@ int TraceWeapon(EnemyWeapon *weapon, int dt) {
  * @param dt The timestep.
  * @return Returns 1 if the repel has timed out, 0 otherwise.
  */
-int UpdateRepel(EnemyWeapon *weapon, int dt) {
+local int UpdateRepel(EnemyWeapon *weapon, int dt) {
     AIArenaData *ad = P_ARENA_DATA(weapon->arena, adkey);
 
     int ticks = current_ticks();
@@ -684,64 +430,25 @@ int UpdateRepel(EnemyWeapon *weapon, int dt) {
         }
     }
     
-    EnemyWeapon *w;
-    FOR_EACH(&ad->weapons, w, link) {
-        if (w->shooter->p_freq == weapon->shooter->p_freq) continue;
-        if (w->type == W_REPEL) continue;
-        
-        int dx = w->x - weapon->x;
-        int dy = w->y - weapon->y;
-        double dist = sqrt(dx * dx + dy * dy);
-        
-        if (dist <= ad->config.repel_distance) {
-            double rot = atan2(dy, dx);
-            int speed = ad->config.repel_speed;
-            w->xspeed = speed * cos(rot);
-            w->yspeed = speed * sin(rot);
-        }
-    }
-    
     pthread_mutex_unlock(&ad->mutex);
     return 0;
 }
 
-/** Update weapons and players by a single tick.
+/** Update ai players by a single tick.
  * @param arena The arena to update.
  */
 local void DoTick(Arena *arena) {
     AIArenaData *ad = P_ARENA_DATA(arena, adkey);
-    
-    Link *link;
-    
-    EnemyWeapon *weapon;
-    
-    pthread_mutex_lock(&ad->mutex);
-    
-    // Update each weapon 1 tick
-    FOR_EACH(&ad->weapons, weapon, link) {
-        // update weapon position
-        if (InSafe(arena, weapon->shooter->position.x / 16, weapon->shooter->position.y / 16)) {
-            // weapon owner in safe
-            FlagWeaponForDestroy(arena, weapon);
-            continue;
-        }
 
-        if (weapon->update(weapon, 1)) {
-            FlagWeaponForDestroy(arena, weapon);
-            continue;
-        }
-    }
-    
-    // Remove weapons that are flagged to be destroyed
-    FOR_EACH(&ad->weapons_destroy, weapon, link)
-        DestroyWeapon(&ad->weapons, weapon);
-    LLEmpty(&ad->weapons_destroy);
+    pthread_mutex_lock(&ad->mutex);  
     
     AIPlayer *aip;
+    Link *link;
     // Update each player 1 tick
     FOR_EACH(&ad->players, aip, link) {
         const int thrust = ad->config.initial_thrust[aip->ship] * 100;
-        const int Speed = 250; // pixels per second
+        const int Speed = ad->config.max_speed[aip->ship] / 10;
+        //const int Speed = 250; // pixels per second
         
         if (aip->dead) {
             if (current_ticks() - aip->time_died >= ad->config.enter_delay) {
@@ -830,15 +537,12 @@ local void DoTick(Arena *arena) {
         
         aip->energy += aip->recharge / 10.0 * (1.0 / 100.0);
         aip->energy = fmin(aip->energy, ad->config.max_energy[aip->ship]);
-        
-        if (!InSafe(arena, aip->x / 16, aip->y / 16))
-            CheckWeaponHit(aip);
     }
     
     pthread_mutex_unlock(&ad->mutex);
 }
 
-int NearOther(int x, int y, int x2, int y2, int r) {
+local int NearOther(int x, int y, int x2, int y2, int r) {
     int dx = x - x2;
     int dy = y - y2;
     return sqrt(dx * dx + dy * dy) <= r;
@@ -861,7 +565,7 @@ local int UpdateTimer(void *param) {
     
     int dt = ticks - ad->last_update;
 
-    // Update players and weapons by 1 tick at a time
+    // Update ai players by 1 tick at a time
     for (int i = 0; i < dt; ++i)
         DoTick(arena);
         
@@ -959,164 +663,25 @@ local int UpdateTimer(void *param) {
 
 /*****************************/
 
-/** Position packet callback. Create a weapon if one was fired. */
-local void OnPPK(Player *p, const struct C2SPosition *pos) {
-    if (!(pos->weapon.type == W_BULLET || pos->weapon.type == W_BOUNCEBULLET ||
-          pos->weapon.type == W_BOMB || pos->weapon.type == W_PROXBOMB ||
-          pos->weapon.type == W_BURST || pos->weapon.type == W_REPEL)) return;
-          
-    Arena *arena = p->arena;
+local void OnWeaponHit(Player *player, EnemyWeapon *weapon) {
+    Arena *arena = player->arena;
     AIArenaData *ad = P_ARENA_DATA(arena, adkey);
-    
+    int type = weapon->type;
+
     pthread_mutex_lock(&ad->mutex);
-    
-    if (pos->weapon.type == W_REPEL) {
-        EnemyWeapon *weapon = amalloc(sizeof(EnemyWeapon));
-        weapon->x = pos->x;
-        weapon->y = pos->y;
-        
-        weapon->type = W_REPEL;
-        weapon->destroy = 0;
-        weapon->created = current_ticks();
-        weapon->arena = arena;
-        weapon->parent = NULL;
-        weapon->update = UpdateRepel;
-        weapon->shooter = p;
-        weapon->active = 1;
-        weapon->level = 0;
-        
-        LLAdd(&ad->weapons, weapon);
-        
-        pthread_mutex_unlock(&ad->mutex);
-        return;
-    } else if (pos->weapon.type == W_BURST) {
-        int amount = ad->config.burst_shrapnel[p->p_ship];
-        
-        double rotation = 0.0;
-        double rot_inc = (2.0 * M_PI) / amount;
-        for (int i = 0; i < amount; ++i) {
-            EnemyWeapon *weapon = amalloc(sizeof(EnemyWeapon));
-            weapon->x = pos->x;
-            weapon->y = pos->y;
-            
-            weapon->type = W_BURST;
-            weapon->destroy = 0;
-            weapon->created = current_ticks();
-            weapon->arena = arena;
-            weapon->parent = NULL;
-            weapon->update = TraceWeapon;
-            weapon->shooter = p;
-            weapon->active = 0;
-            weapon->max_damage = ad->config.burst_damage_level;
-            weapon->rotation = rotation;
-            weapon->bouncing = 1;
-            weapon->xspeed = 0;
-            weapon->yspeed = 0;
-            weapon->level = 0;
-            weapon->speed = ad->config.burst_speed[p->p_ship];
-            
-            LLAdd(&ad->weapons, weapon);
-            
-            rotation += rot_inc;
-        }
-        
-        pthread_mutex_unlock(&ad->mutex);
-        return;
-    }
-          
-    EnemyWeapon *weapon = amalloc(sizeof(EnemyWeapon));
-    
-    weapon->rotation = ((40 - (pos->rotation + 30) % 40) * 9) * (M_PI / 180);
-    
-    int radius = ad->config.radius[p->p_ship];
-    
-    
-    weapon->xspeed = p->position.xspeed;
-    weapon->yspeed = p->position.yspeed;
-    weapon->type = pos->weapon.type;
-    weapon->destroy = 0;
-    weapon->level = pos->weapon.level;
-    
-    weapon->speed = ad->config.bullet_speed[p->p_ship];
-    
-    if (weapon->type == W_BOMB || weapon->type == W_PROXBOMB) {
-        weapon->bounces_left = ad->config.bounce_count[p->p_ship];
-        weapon->max_damage = ad->config.bomb_damage_level;
-        weapon->bouncing = weapon->bounces_left > 0;
-        
-        weapon->speed = ad->config.bomb_speed[p->p_ship];
-        weapon->x = pos->x;
-        weapon->y = pos->y;
-    }
-    
-    if (weapon->type == W_BULLET || weapon->type == W_BOUNCEBULLET) {
-        int level = pos->weapon.level;
-        weapon->max_damage = ad->config.bullet_damage_level + ad->config.bullet_damage_upgrade * level;
-        
-        if (ad->config.bullet_exact_damage == 0)
-            weapon->max_damage = prng->Number(1, weapon->max_damage);
-        weapon->x = pos->x + radius * cos(weapon->rotation);
-        weapon->y = pos->y - radius * sin(weapon->rotation);
-        weapon->bouncing = pos->weapon.type == W_BOUNCEBULLET;
-    }
-    
-    weapon->created = current_ticks();
-    weapon->arena = arena;
-    weapon->parent = NULL;
-    weapon->update = TraceWeapon;
-    weapon->shooter = p;
-    weapon->active = 1;
-    
-    LLAdd(&ad->weapons, weapon);
-    
-    if (weapon->type == W_BULLET || weapon->type == W_BOUNCEBULLET) {
-        if (ad->config.double_barrel[p->p_ship]) {
-            int offset = radius * 0.7;
-            
-            int xoffset = offset * sin(weapon->rotation);
-            int yoffset = offset * cos(weapon->rotation);
-            
-            EnemyWeapon *other = amalloc(sizeof(EnemyWeapon));
-            *other = *weapon;
-            
-            weapon->x += xoffset;
-            weapon->y += yoffset;
-            
-            other->x -= xoffset;
-            other->y -= yoffset;
-            
-            other->parent = weapon;
-            
-            LLAdd(&ad->weapons, other);
-        }
-        
-        if (pos->weapon.alternate == 1) {
-            // multifire
-            double angle = (ad->config.multifire_angle[p->p_ship] / 111.0) * (M_PI / 180);
-            
-            EnemyWeapon *first = amalloc(sizeof(EnemyWeapon));
-            *first = *weapon;
-            
-            EnemyWeapon *second = amalloc(sizeof(EnemyWeapon));
-            *second = *weapon;
-            
-            first->rotation = weapon->rotation + angle;
-            second->rotation = weapon->rotation - angle;
-            
-            first->x = pos->x + radius * cos(first->rotation);
-            first->y = pos->y - radius * sin(first->rotation);
-            
-            second->x = pos->x + radius * cos(second->rotation);
-            second->y = pos->y - radius * sin(second->rotation);
-            
-            first->parent = weapon;
-            second->parent = weapon;
-            
-            LLAdd(&ad->weapons, first);
-            LLAdd(&ad->weapons, second);
+
+    chat->SendArenaMessage(arena, "%s hit by weapon", player->name);
+
+    AIPlayer *aip;
+    Link *link;
+
+    FOR_EACH(&ad->players, aip, link) {
+        if (aip->player == player) {
+            aip->last_hitter = weapon->shooter;
+            aip->energy -= aip->damage_funcs[type](aip, weapon);
         }
     }
-    
+
     pthread_mutex_unlock(&ad->mutex);
 }
 
@@ -1149,8 +714,11 @@ local void ReadConfig(Arena* arena) {
         ad->config.upgrade_recharge[i] = config->GetInt(arena->cfg, ShipNames[i], "UpgradeRecharge", 166);
         ad->config.max_recharge[i] = config->GetInt(arena->cfg, ShipNames[i], "MaximumRecharge", 1150);
         
-        ad->config.bounce_count[i] = config->GetInt(arena->cfg, ShipNames[i], "BombBounceCount", 0);
         ad->config.initial_thrust[i] = config->GetInt(arena->cfg, ShipNames[i], "InitialThrust", 15);
+        ad->config.initial_speed[i] = config->GetInt(arena->cfg, ShipNames[i], "InitialSpeed", 3200);
+        ad->config.max_speed[i] = config->GetInt(arena->cfg, ShipNames[i], "MaximumSpeed", 5000);
+        
+        ad->config.bounce_count[i] = config->GetInt(arena->cfg, ShipNames[i], "BombBounceCount", 0);
         ad->config.double_barrel[i] = config->GetInt(arena->cfg, ShipNames[i], "DoubleBarrel", 0);
         ad->config.multifire_angle[i] = config->GetInt(arena->cfg, ShipNames[i], "MultiFireAngle", 500);
         
@@ -1330,16 +898,14 @@ EXPORT int MM_ai(int action, Imodman *mm_, Arena* arena) {
             ad->last_update = current_ticks();
 
             LLInit(&ad->players);
-            LLInit(&ad->weapons);
-            LLInit(&ad->weapons_destroy);
             
             ml->SetTimer(UpdateTimer, UPDATE_FREQUENCY, UPDATE_FREQUENCY, arena, NULL);
 
             cmd->AddCommand("createai", Ccreateai, arena, help_createai);
             cmd->AddCommand("removeai", Cremoveai, arena, help_removeai);
 
-            mm->RegCallback(CB_PPK, OnPPK, arena);
             mm->RegCallback(CB_ARENAACTION, OnArenaAction, arena);
+            mm->RegCallback(CB_WEAPONHIT, OnWeaponHit, arena);
 
             rv = MM_OK;
         }
@@ -1351,8 +917,8 @@ EXPORT int MM_ai(int action, Imodman *mm_, Arena* arena) {
             cmd->RemoveCommand("createai", Ccreateai, arena);
             cmd->RemoveCommand("removeai", Cremoveai, arena);
 
-            mm->UnregCallback(CB_PPK, OnPPK, arena);
             mm->UnregCallback(CB_ARENAACTION, OnArenaAction, arena);
+            mm->UnregCallback(CB_WEAPONHIT, OnWeaponHit, arena);
 
             ml->ClearTimer(UpdateTimer, NULL);
 
@@ -1363,16 +929,6 @@ EXPORT int MM_ai(int action, Imodman *mm_, Arena* arena) {
                 aip = LLRemoveFirst(&ad->players);
             }
             LLEmpty(&ad->players);
-            
-            LLEmpty(&ad->weapons_destroy);
-            
-            EnemyWeapon* weapon= LLRemoveFirst(&ad->weapons);
-            while (weapon) {
-                afree(weapon);
-                weapon = LLRemoveFirst(&ad->weapons);
-            }
-            LLEmpty(&ad->weapons);
-            
             
             pthread_mutexattr_destroy(&ad->pthread_attr);
             pthread_mutex_destroy(&ad->mutex);
