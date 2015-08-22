@@ -152,6 +152,24 @@ typedef struct {
 } AIArenaData;
 local int adkey;
 
+typedef enum StateType {
+    ChaseState,
+    BombState
+} StateType;
+
+struct State;
+
+typedef void(*StateUpdate)(AIPlayer *aip, struct State *state);
+
+typedef struct State {
+    void *data;
+    StateType type;
+    StateUpdate update;
+} State;
+
+typedef struct StateMachine {
+    LinkedList stack;
+} StateMachine;
 
 local void ReadConfig(Arena* arena);
 local void DestroyAIPlayer(LinkedList *players, AIPlayer *aip);
@@ -160,6 +178,26 @@ local int InSafe(Arena *arena, int x, int y);
 local int BulletDamage(AIPlayer *aip, EnemyWeapon *weapon);
 local int BombDamage(AIPlayer *aip, EnemyWeapon *weapon);
 local int RepelDamage(AIPlayer *aip, EnemyWeapon *weapon);
+
+local void PushState(StateMachine *machine, State *state) {
+    LLAddFirst(&machine->stack, state);
+}
+
+local State *PopState(StateMachine *machine) {
+    return LLRemoveFirst(&machine->stack);
+}
+
+local State *GetState(StateMachine *machine) {
+    return LLGetHead(&machine->stack)->data;
+}
+
+local void ChaseUpdate(AIPlayer *aip, State *state) {
+    
+}
+
+local void BombUpdate(AIPlayer *aip, State *state) {
+    lm->Log(L_INFO, "Bombing.");
+}
 
 /************************/
 
@@ -212,6 +250,15 @@ local AIPlayer *CreateAI(Arena *arena, const char *name, int freq, int ship) {
     aip->damage_funcs[W_BOMB] = aip->damage_funcs[W_PROXBOMB] = BombDamage;
     aip->damage_funcs[W_REPEL] = RepelDamage;
     aip->damage_funcs[W_BURST] = BulletDamage;
+    
+    aip->state_machine = malloc(sizeof(StateMachine));
+    State* state = malloc(sizeof(State));
+    
+    state->update = ChaseUpdate;
+    state->type = ChaseState;
+    state->data = NULL;
+    
+    PushState(aip->state_machine, state);
     
     pthread_mutex_lock(&ad->mutex);
     aip->energy = ad->config.initial_energy[aip->ship];
@@ -634,11 +681,15 @@ local int UpdateTimer(void *param) {
                 }
                 aip->target.position.x = head->x * 16;
                 aip->target.position.y = head->y * 16;
-                lm->Log(L_INFO, "Target: %d, %d (%d)", head->x, head->y, LLCount(aip->path));
+                //lm->Log(L_INFO, "Target: %d, %d (%d)", head->x, head->y, LLCount(aip->path));
             } else {
                 aip->target.type = TargetNone;
             }
         }
+        
+        State* state = GetState(aip->state_machine);
+        
+        state->update(aip, state);
 
         double angle = aip->rotation * 180 / M_PI;
         int rot = (angle / 9) + 10;
@@ -647,13 +698,21 @@ local int UpdateTimer(void *param) {
         ppk.rotation = rot;
         ppk.x = aip->x;
         ppk.y = aip->y;
+        
         ppk.energy = aip->energy;
         ppk.xspeed = aip->xspeed;
         ppk.yspeed = aip->yspeed;
         
         if (aip->target.type != TargetPlayer || InSafe(arena, ppk.x / 16, ppk.y / 16))
             ppk.weapon.type = W_NULL;
-
+        
+        /* TODO: remove test code
+        ppk.x = aip->x = 530 * 16;
+        ppk.y = aip->y = 530 * 16;
+        ppk.xspeed = 0;
+        ppk.yspeed = 0;
+        ppk.weapon.type = W_NULL;*/
+        
         game->FakePosition(aip->player, &ppk, sizeof(ppk));
     }
 
@@ -669,8 +728,6 @@ local void OnWeaponHit(Player *player, EnemyWeapon *weapon) {
     int type = weapon->type;
 
     pthread_mutex_lock(&ad->mutex);
-
-    chat->SendArenaMessage(arena, "%s hit by weapon", player->name);
 
     AIPlayer *aip;
     Link *link;

@@ -57,55 +57,7 @@ local int ZBulletDamage(AIPlayer *aip, EnemyWeapon *weapon) {
 }
 
 local void OnBombExplosion(EnemyWeapon *weapon) {
-    double x = weapon->x;
-    double y = weapon->y;
-  
-    struct PlayerPosition *pos = &test_player->player->position;
-    int rot = pos->rotation;
-  
-    unsigned status = STATUS_STEALTH | STATUS_CLOAK | STATUS_UFO;
-
-  /*  
-  int dx = x - weapon->shooter->position.x;
-  int dy = y - weapon->shooter->position.y;
-  
-  int offset = 4 * 16;
-  if (dx < 0) x -= offset;
-  if (dx > 0) x += offset;
-  if (dy < 0) y += offset;
-  if (dy > 0) y -= offset;*/
-
-    struct S2CWeapons packet = {
-		S2C_WEAPON, rot, current_ticks() & 0xFFFF,
-		x, 0, test_player->player->pid, 0, 0,
-		status, 0, y, 0
-	};
-  
-    packet.weapon.alternate = 0;
-    packet.weapon.level = 0;
-    packet.weapon.shrap = 0;
-    packet.weapon.shrapbouncing = 0;
-    packet.weapon.shraplevel = 0;
-    packet.weapon.type = W_REPEL;
-  
-    LinkedList list;
-    Link *link;
-    Player *i;
-
-    LLInit(&list);
-    pd->Lock();
-    FOR_EACH_PLAYER(i) {
-    if (i->arena == weapon->arena)
-        LLAdd(&list, i);
-    }
-    pd->Unlock();
-
-    game->DoWeaponChecksum(&packet);
-    net->SendToSet(&list, (byte*)&packet, sizeof(struct S2CWeapons) - sizeof(struct ExtraPosData), NET_RELIABLE);
-
-    LLEmpty(&list);
-
-    chat->SendArenaMessage(weapon->arena, "Bursting from bomb explosion at %d, %d", (int)x/16, (int)y/16);
+    
 }
 
 EXPORT const char info_zombies[] = "zombies v0.1 by monkey\n";

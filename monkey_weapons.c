@@ -216,7 +216,7 @@ local int CheckWeaponHit(Player *player, EnemyWeapon *weapon) {
     // Used for bomb calculations
     double ed = ad->config.bomb_explode_delay;
     
-    int ship_radius = ad->config.radius[player->p_ship];
+    int ship_radius = ad->config.radius[player->p_ship] + 3;
     int hit_dist = ship_radius;
     
     if (weapon->type == W_PROXBOMB) {
@@ -229,10 +229,10 @@ local int CheckWeaponHit(Player *player, EnemyWeapon *weapon) {
     double x = pos->x;
     double y = pos->y;
     
-    if (weapon->type == W_BOMB || weapon->type == W_PROXBOMB) {
+   /* if (weapon->type == W_BOMB || weapon->type == W_PROXBOMB) {
         x += (pos->xspeed / 10) * (UPDATE_FREQUENCY / 100.0);
         y += (pos->yspeed / 10) * (UPDATE_FREQUENCY / 100.0);
-    }
+    }*/
     
     double dx = weapon->x - x;
     double dy = weapon->y - y;
@@ -240,7 +240,12 @@ local int CheckWeaponHit(Player *player, EnemyWeapon *weapon) {
     double dist = sqrt(dx * dx + dy * dy);
     int rv = 0;
     
-    if (dist <= hit_dist) {
+    int x_min = x - hit_dist;
+    int x_max = x + hit_dist;
+    int y_min = x - hit_dist;
+    int y_max = x + hit_dist;
+    
+    if (weapon->x >= x_min && weapon->x <= x_max && weapon->y >= y_min && weapon->y <= y_max) {
         if (weapon->type == W_PROXBOMB) {
             // Move weapon position and player position by the bomb explode delay then calculate damage.
             weapon->x += cos(weapon->rotation) * (ed / 100.0) + ((weapon->xspeed / 10) * (ed / 100.0));
@@ -338,70 +343,69 @@ local int TraceWeapon(EnemyWeapon *weapon, int dt) {
         tile_x = floor(x / 16.0);
         tile_y = floor(y / 16.0);
         
-        if (tile_x == last_tile_x && tile_y == last_tile_y)
-            continue;
-            
-        solid = IsSolid(arena, tile_x, tile_y);
+        if (tile_x != last_tile_x && tile_y != last_tile_y) {            
+            solid = IsSolid(arena, tile_x, tile_y);
 
-        if (solid) {
-            if (weapon->type == W_BOMB || weapon->type == W_PROXBOMB) {
-                if ((weapon->bouncing && weapon->bounces_left-- <= 0) || !weapon->bouncing) {
-                    DoBombDamage(arena, weapon);
+            if (solid) {
+                if (weapon->type == W_BOMB || weapon->type == W_PROXBOMB) {
+                    if ((weapon->bouncing && weapon->bounces_left-- <= 0) || !weapon->bouncing) {
+                        DoBombDamage(arena, weapon);
+                        break;
+                    }
+                }
+                
+                // if bouncing then flip the rotation of the weapon when it collides with a tile
+                if (weapon->bouncing) {
+                    if (weapon->type == W_BURST && weapon->active == 0)
+                        weapon->active = 1;
+                    
+                    int dx = tile_x - last_tile_x;
+                    int dy = tile_y - last_tile_y;
+                    
+                    int below = (int)(floor(y)) % 16 < 3;
+                    int above = (int)(floor(y)) % 16 > 13;
+                    int right = (int)(floor(x)) % 16 < 3;
+                    int left = (int)(floor(x)) % 16 > 13;
+                    
+                    int horizontal = (below && dy > 0) || (above && dy < 0);
+                    int vertical = (right && dx > 0) || (left && dx < 0);
+                    
+                    double c = cos(weapon->rotation);
+                    double s = sin(weapon->rotation);
+                    
+                    if (horizontal) {
+                        s = -s;
+                        weapon->yspeed *= -1;
+                    }
+                        
+                    if (vertical) {
+                        c = -c;
+                        weapon->xspeed *= -1;
+                    }
+                    
+                    weapon->rotation = atan2(s, c);
+                    
+                    solid = 0;
+                } else {
                     break;
                 }
             }
-            
-            // if bouncing then flip the rotation of the weapon when it collides with a tile
-            if (weapon->bouncing) {
-                if (weapon->type == W_BURST && weapon->active == 0)
-                    weapon->active = 1;
-                
-                int dx = tile_x - last_tile_x;
-                int dy = tile_y - last_tile_y;
-                
-                int below = (int)(floor(y)) % 16 < 3;
-                int above = (int)(floor(y)) % 16 > 13;
-                int right = (int)(floor(x)) % 16 < 3;
-                int left = (int)(floor(x)) % 16 > 13;
-                
-                int horizontal = (below && dy > 0) || (above && dy < 0);
-                int vertical = (right && dx > 0) || (left && dx < 0);
-                
-                double c = cos(weapon->rotation);
-                double s = sin(weapon->rotation);
-                
-                if (horizontal) {
-                    s = -s;
-                    weapon->yspeed *= -1;
-                }
-                    
-                if (vertical) {
-                    c = -c;
-                    weapon->xspeed *= -1;
-                }
-                
-                weapon->rotation = atan2(s, c);
-                
-                solid = 0;
-            } else {
-                break;
-            }
-        }
 
-        last_tile_x = tile_x;
-        last_tile_y = tile_y;
+            last_tile_x = tile_x;
+            last_tile_y = tile_y;
+        }
         
         Link *link;
         Player *player;
+        
+        weapon->x = x;
+        weapon->y = y;
         
         pd->Lock();
         FOR_EACH_PLAYER_IN_ARENA(player, arena) {
             if (player->p_ship != SHIP_SPEC && 
                 player->p_freq != weapon->shooter->p_freq)
             {
-                weapon->x = x;
-                weapon->y = y;
-                
                 if (CheckWeaponHit(player, weapon)) {
                     pd->Unlock();
                     pthread_mutex_unlock(&ad->mutex);
@@ -497,7 +501,7 @@ local int UpdateTimer(void *param) {
     for (int i = 0; i < dt; ++i)
         DoTick(arena);
         
-    ad->last_update = current_ticks();
+    ad->last_update = ticks;
 
     pthread_mutex_unlock(&ad->mutex);
     return 1;

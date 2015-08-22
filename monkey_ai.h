@@ -31,6 +31,8 @@ typedef struct AITarget {
     TargetType type;
 } AITarget;
 
+struct StateMachine;
+
 /** The data that's associated with each ai player. */
 typedef struct AIPlayer {
     /** The name of this ai player. */
@@ -90,6 +92,8 @@ typedef struct AIPlayer {
     
     /** The function to call per weapon type when damage should be dealt. */
     WeaponDamageFunc damage_funcs[17];
+    
+    struct StateMachine *state_machine;
 } AIPlayer;
 
 /** This callback happens when an AI player takes damage. */
